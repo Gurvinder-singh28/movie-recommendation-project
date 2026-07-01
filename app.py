@@ -1,13 +1,19 @@
 import os
 from urllib.parse import quote
 
-import requests
 import streamlit as st
+from recommender import (
+    get_home_feed,
+    get_movie_details,
+    get_genre_recommendations,
+    get_tfidf_recommendations,
+    search_bundle,
+    tmdb_search_movies,
+)
 
 # =============================
 # CONFIG
 # =============================
-API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000").rstrip("/")
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
 st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
@@ -97,17 +103,27 @@ def goto_details(tmdb_id: int):
 
 
 # =============================
-# API HELPERS
+# DATA HELPERS (now call recommender.py directly, no HTTP)
 # =============================
-@st.cache_data(ttl=30)  # short cache for autocomplete
-def api_get_json(path: str, params: dict | None = None):
+@st.cache_data(ttl=30)
+def safe_call(fn_name: str, **kwargs):
+    """
+    Calls a function from recommender.py by name, catches errors,
+    and returns (data, error) just like the old api_get_json did.
+    """
+    fn_map = {
+        "home": get_home_feed,
+        "search": tmdb_search_movies,
+        "details": get_movie_details,
+        "bundle": search_bundle,
+        "genre": get_genre_recommendations,
+        "tfidf": get_tfidf_recommendations,
+    }
+    fn = fn_map[fn_name]
     try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=25)
-        if r.status_code >= 400:
-            return None, f"HTTP {r.status_code}: {r.text[:300]}"
-        return r.json(), None
+        return fn(**kwargs), None
     except Exception as e:
-        return None, f"Request failed: {e}"
+        return None, str(e)
 
 
 def poster_grid(cards, cols=6, key_prefix="grid"):
@@ -157,20 +173,12 @@ def to_cards_from_tfidf_items(tfidf_items):
 
 
 # =============================
-# IMPORTANT: Robust TMDB search parsing
-# Supports BOTH API shapes:
-# 1) raw TMDB: {"results":[{id,title,poster_path,...}]}
-# 2) list cards: [{tmdb_id,title,poster_url,...}]
+# Robust TMDB search parsing
+# tmdb_search_movies() always returns raw TMDB shape: {"results":[...]}
 # =============================
 def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
-    """
-    Returns:
-      suggestions: list[(label, tmdb_id)]
-      cards: list[{tmdb_id,title,poster_url}]
-    """
     keyword_l = keyword.strip().lower()
 
-    # A) If API returns dict with 'results'
     if isinstance(data, dict) and "results" in data:
         raw = data.get("results") or []
         raw_items = []
@@ -188,42 +196,18 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
                     "release_date": m.get("release_date", ""),
                 }
             )
-
-    # B) If API returns already as list
-    elif isinstance(data, list):
-        raw_items = []
-        for m in data:
-            # might be {tmdb_id,title,poster_url}
-            tmdb_id = m.get("tmdb_id") or m.get("id")
-            title = (m.get("title") or "").strip()
-            poster_url = m.get("poster_url")
-            if not title or not tmdb_id:
-                continue
-            raw_items.append(
-                {
-                    "tmdb_id": int(tmdb_id),
-                    "title": title,
-                    "poster_url": poster_url,
-                    "release_date": m.get("release_date", ""),
-                }
-            )
     else:
         return [], []
 
-    # Word-match filtering (contains)
     matched = [x for x in raw_items if keyword_l in x["title"].lower()]
-
-    # If nothing matched, fallback to raw list (so never blank)
     final_list = matched if matched else raw_items
 
-    # Suggestions = top 10 labels
     suggestions = []
     for x in final_list[:10]:
         year = (x.get("release_date") or "")[:4]
         label = f"{x['title']} ({year})" if year else x["title"]
         suggestions.append((label, x["tmdb_id"]))
 
-    # Cards = top N
     cards = [
         {"tmdb_id": x["tmdb_id"], "title": x["title"], "poster_url": x["poster_url"]}
         for x in final_list[:limit]
@@ -273,7 +257,7 @@ if st.session_state.view == "home":
         if len(typed.strip()) < 2:
             st.caption("Type at least 2 characters for suggestions.")
         else:
-            data, err = api_get_json("/tmdb/search", params={"query": typed.strip()})
+            data, err = safe_call("search", query=typed.strip())
 
             if err or data is None:
                 st.error(f"Search failed: {err}")
@@ -282,13 +266,11 @@ if st.session_state.view == "home":
                     data, typed.strip(), limit=24
                 )
 
-                # Dropdown
                 if suggestions:
                     labels = ["-- Select a movie --"] + [s[0] for s in suggestions]
                     selected = st.selectbox("Suggestions", labels, index=0)
 
                     if selected != "-- Select a movie --":
-                        # map label -> id
                         label_to_id = {s[0]: s[1] for s in suggestions}
                         goto_details(label_to_id[selected])
                 else:
@@ -302,9 +284,7 @@ if st.session_state.view == "home":
     # HOME FEED MODE
     st.markdown(f"### 🏠 Home — {home_category.replace('_',' ').title()}")
 
-    home_cards, err = api_get_json(
-        "/home", params={"category": home_category, "limit": 24}
-    )
+    home_cards, err = safe_call("home", category=home_category, limit=24)
     if err or not home_cards:
         st.error(f"Home feed failed: {err or 'Unknown error'}")
         st.stop()
@@ -322,7 +302,6 @@ elif st.session_state.view == "details":
             goto_home()
         st.stop()
 
-    # Top bar
     a, b = st.columns([3, 1])
     with a:
         st.markdown("### 📄 Movie Details")
@@ -330,13 +309,11 @@ elif st.session_state.view == "details":
         if st.button("← Back to Home"):
             goto_home()
 
-    # Details (your FastAPI safe route)
-    data, err = api_get_json(f"/movie/id/{tmdb_id}")
+    data, err = safe_call("details", tmdb_id=tmdb_id)
     if err or not data:
         st.error(f"Could not load details: {err or 'Unknown error'}")
         st.stop()
 
-    # Layout: Poster LEFT, Details RIGHT
     left, right = st.columns([1, 2.4], gap="large")
 
     with left:
@@ -373,12 +350,10 @@ elif st.session_state.view == "details":
     st.divider()
     st.markdown("### ✅ Recommendations")
 
-    # Recommendations (TF-IDF + Genre) via your bundle endpoint
     title = (data.get("title") or "").strip()
     if title:
-        bundle, err2 = api_get_json(
-            "/movie/search",
-            params={"query": title, "tfidf_top_n": 12, "genre_limit": 12},
+        bundle, err2 = safe_call(
+            "bundle", query=title, tfidf_top_n=12, genre_limit=12
         )
 
         if not err2 and bundle:
@@ -397,9 +372,7 @@ elif st.session_state.view == "details":
             )
         else:
             st.info("Showing Genre recommendations (fallback).")
-            genre_only, err3 = api_get_json(
-                "/recommend/genre", params={"tmdb_id": tmdb_id, "limit": 18}
-            )
+            genre_only, err3 = safe_call("genre", tmdb_id=tmdb_id, limit=18)
             if not err3 and genre_only:
                 poster_grid(
                     genre_only, cols=grid_cols, key_prefix="details_genre_fallback"
@@ -408,4 +381,3 @@ elif st.session_state.view == "details":
                 st.warning("No recommendations available right now.")
     else:
         st.warning("No title available to compute recommendations.")
-        
