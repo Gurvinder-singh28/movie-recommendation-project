@@ -357,12 +357,16 @@ elif st.session_state.view == "details":
         )
 
         if not err2 and bundle:
+            tfidf_cards = to_cards_from_tfidf_items(bundle.get("tfidf_recommendations"))
+
             st.markdown("#### 🔎 Similar Movies (TF-IDF)")
-            poster_grid(
-                to_cards_from_tfidf_items(bundle.get("tfidf_recommendations")),
-                cols=grid_cols,
-                key_prefix="details_tfidf",
-            )
+            if tfidf_cards:
+                poster_grid(tfidf_cards, cols=grid_cols, key_prefix="details_tfidf")
+            else:
+                st.caption(
+                    "🕐 This title is too new to be in our similarity model yet — "
+                    "showing genre-based matches instead."
+                )
 
             st.markdown("#### 🎭 More Like This (Genre)")
             poster_grid(
@@ -381,3 +385,5 @@ elif st.session_state.view == "details":
                 st.warning("No recommendations available right now.")
     else:
         st.warning("No title available to compute recommendations.")
+
+        

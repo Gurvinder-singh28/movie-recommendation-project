@@ -218,10 +218,12 @@ def search_bundle(query: str, tfidf_top_n: int = 12, genre_limit: int = 12) -> D
 
     try:
         recs = tfidf_recommend_titles(details["title"], top_n=tfidf_top_n)
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] tfidf lookup failed for '{details['title']}': {e}")
         try:
             recs = tfidf_recommend_titles(query, top_n=tfidf_top_n)
-        except Exception:
+        except Exception as e2:
+            print(f"[DEBUG] fallback also failed for '{query}': {e2}")
             recs = []
 
     tfidf_items = []
