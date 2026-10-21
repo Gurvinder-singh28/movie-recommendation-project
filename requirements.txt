@@ -1,7 +1,7 @@
-streamlit
+fastapi
+uvicorn[standard]
+httpx
 pandas
 numpy
 scikit-learn
-joblib
-requests
 python-dotenv
